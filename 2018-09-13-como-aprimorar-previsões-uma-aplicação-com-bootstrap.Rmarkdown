@@ -1,0 +1,133 @@
+---
+title: 'Como aprimorar previsões: uma aplicação com bootstrap'
+author: J. Renato
+date: '2018-09-13'
+slug: como-aprimorar-previsões-uma-aplicação-com-bootstrap
+categories:
+  - Previsão
+tags:
+  - Previsão
+  - bagging
+  - bootstrap
+subtitle: ''
+summary: ''
+authors: []
+lastmod: '2019-09-08T19:43:09-03:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: no
+projects: []
+---
+
+O exercício de hoje tem como objetivo apresentar uma técnica com potencial para aprimorar a previsão pontual de uma série, conhecida como **bagging** (*bootstrap aggregating*).
+
+Partindo do pressuposto de que toda série temporal é uma realização específica de um processo estocástico, o que este método faz é gerar outras possíveis realizações (séries) deste mesmo processo gerador. E como isso é feito? 
+
+Em primeiro lugar, a série original é decomposta em tendência, sazonalidade e restante (pense neste último termo como a parte aleatória da série). Este termo restante é submetido a um processo de bootstrap, isto é, ele sofre um processo de re-amostragem. Todavia, como o termo aleatório de uma série temporal pode ser correlacionado no tempo, esta re-amostragem não é feita por observações, mas em blocos — **blocked bootstrap**. Por fim, estes novos componentes aleatórios obtidos via bootstrap são reintroduzidos aos componentes de tendência e sazonalidade da série original formando novas séries que são variantes dela.
+
+Para ficar mais claro, considere o gráfico abaixo. A linha preta é a série original da taxa de desocupação medida pela Pnad Contínua Mensal (IBGE). As linhas coloridas são séries calculadas a partir do processo descrito acima. Do ponto de vista estatístico, qualquer uma daquelas séries poderia ter ocorrido, sendo a série “verdadeira” aquela que efetivamente ocorreu.
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+## Carregar os pacotes necessários
+library(sidrar)
+library(tidyverse)
+library(forecast)
+library(timetk)
+## Importar os dados da PNAD 
+pnad <- sidrar::get_sidra(api = "/t/6381/n1/all/v/4099/p/all/d/v4099%201")
+## Criar série de tempo 
+pnad_ts <- ts(pnad$Valor, start = c(2012,3), freq = 12)
+## Definir amostras de treino e de teste
+pnad_treino <- window(pnad_ts, end = c(2016,7))
+pnad_teste <- window(pnad_ts, start = c(2016,8))
+## Definir o número de bootstraps
+k <- 10
+## Computar as séries através de "blocked bootstrap"
+pnad_boot <- forecast::bld.mbb.bootstrap(pnad_treino, k) %>%
+  
+  purrr::map(.f = ts, start = c(2012,3), freq = 12)
+## Visualizar
+autoplot(pnad_treino) + 
+  
+  autolayer(ts(as.data.frame(pnad_boot), start = c(2012,3), freq = 12), lwd = 1) +
+  
+  autolayer(pnad_treino, colour = "FALSE", lwd = 1) +
+  
+  guides(color = "none") +
+  
+  labs(title = "Séries calculadas por Bootstrap",
+       x = "", y = "")
+```
+
+Ok, entendido até aqui. E agora? Agora, o método consiste em obter as previsões para cada uma das séries e calcular a média das previsões. Você pode estar se perguntando se, de fato, este método melhora o poder preditivo de um modelo. Existem trabalhos que mostram aumento de performance, na média, para alguns modelos. De todo modo, é aconselhável checar se o mesmo é válido para a série e para o modelo que estamos utilizando. Vamos fazer um exemplo?
+
+Antes de começarmos, uma breve explicação. Utilizaremos a função bld.mbb.bootstrap() do pacote forecast para calcular as séries via bootstrap, conforme o gráfico acima. O resultado será um objeto do tipo lista com as séries geradas. Em seguida, vamos utilizar a função map() do pacote purrr para gerar previsões para cada uma das séries através do auto.arima(), também do pacote forecast. Mas lembre-se que você pode utilizar qualquer modelo que desejar. O pacote forecast tem uma implementação direta através da função baggedModel(), mas eu preferi desagregar o trabalho para deixar mais claro como é feito. Por fim, vamos comparar os erros de previsão (fora da amostra) da série original e da média das séries geradas (bagging).
+
+**Passo 1: carregar pacotes necessários**
+
+```{r, message=FALSE, warning=FALSE}
+library(sidrar)
+library(tidyverse)
+library(forecast)
+library(timetk)
+```
+
+**Passo 2: importar a série temporal da PNAD**
+
+```{r, message=F, warning=F}
+
+pnad <- sidrar::get_sidra(api = "/t/6381/n1/all/v/4099/p/all/d/v4099%201")
+
+pnad_ts <- ts(pnad$Valor, start = c(2012,3), freq = 12)
+```
+
+**Passo 3: definir amostras de treino e de teste para medir a acurácia das previsões e também o número de séries geradas por bootstrap**
+
+```{r}
+
+pnad_treino <- window(pnad_ts, end = c(2016,7))
+
+pnad_teste <- window(pnad_ts, start = c(2016,8))
+
+k <- 10
+```
+
+**Passo 4: computar as séries via bootstrap**
+
+```{r, warning=F, message=F}
+pnad_boot <- forecast::bld.mbb.bootstrap(pnad_treino, k) %>%
+  
+  purrr::map(.f = ts, start = c(2012,3), freq = 12)
+```
+
+**Passo 5: computar previsões por auto.arima, por bagging**
+
+```{r, warning=F, message=F}
+ 
+aa_fc <- function(x){forecast(auto.arima(x, max.d = 1), n = 24)[["mean"]]}
+
+pnad_boot_fc <- purrr::map(.x = pnad_boot, .f = aa_fc)
+
+## Computar a previsão pelo método bagging
+
+fc_original <- pnad_boot_fc[[1]]
+
+fc_bagged <- pnad_boot_fc %>% purrr::reduce(`+`) %>% `/`(k)
+```
+
+**Passo 6: comparar a acurácia dos modelos**
+
+```{r, warning=F, message=F}
+
+accuracy(fc_original, pnad_teste)
+
+accuracy(fc_bagged, pnad_teste)
+```
+
+De fato, como é possível observar, as previsões a partir do método **bagging** apresentaram desempenho superior. 
+
+Os códigos dos exercícios encontram-se disponíveis no [repositório](http://github.com/leripio/blog) do blog no github.
+
+**Aviso legal**: Todo o conteúdo desta página é de responsabilidade pessoal do autor e não expressa a visão da instituição a qual o autor tem vínculo profissional.

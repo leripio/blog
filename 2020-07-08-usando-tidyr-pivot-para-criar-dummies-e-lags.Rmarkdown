@@ -1,0 +1,93 @@
+---
+title: Usando tidyr para criar dummies e lags
+author: Renato Leripio
+date: '2020-07-08'
+slug: usando-tidyr-pivot-para-criar-dummies-e-lags
+categories:
+  - Data Science
+tags:
+  - tidyverse 
+  - tidyr 
+  - lags 
+  - dummies 
+  - rstats
+subtitle: ''
+summary: ''
+authors: []
+lastmod: '2020-07-08T20:56:53-03:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: no
+projects: []
+---
+
+Imagine que você tenha uma base de dados com dezenas (ou centenas) de variáveis e quer criar os *lags* de 1 a 5 para cada uma destas variáveis. Além disso, precisa adicionar *dummies* mensais para controlar algum fator sazonal. Esta tarefa faz parte do dia-a-dia de quem trabalha com modelos econométricos/machine learning e ter uma forma prática ajuda bastante. 
+
+Existem algumas formas de resolver esse problema. Uma bem simples e prática envolve o `tidyr`, pacote do `tidyverse` dedicado à manipulação de *frames*. Suas principais funções são `pivot_longer` e `pivot_wider`, usadas para posicionar os dados, respectivamente, em formato *long* e *wide*. Fazendo uso correto destas funções e de seus argumentos, é possível resolver o problema de forma muito simples. Então vamos lá!
+
+Para começar, vou criar uma *frame* artificial contendo uma coluna com datas mensais e três colunas representando diferentes variáveis -- var1, var2 e var3. Lembrando que a abordagem é geral o suficiente para acomodar qualquer número de variáveis.
+
+```{r, warning=F, message=F}
+
+library(tidyverse)
+library(lubridate)
+
+set.seed(123)
+
+df <- tibble(data = seq(ymd("2019-01-01"), ymd("2020-07-01"), by = "month"),
+             var1 = rnorm(19),
+             var2 = rnorm(19),
+             var3 = rnorm(19))
+
+tail(df, 5)
+
+```
+
+De início, vamos criar as *dummies* sazonais. O primeiro passo é criar uma coluna com os meses da coluna de datas. A função `month` do pacote `lubridate` fornece uma forma conveniente para isso. Em seguida, criamos uma coluna com valores iguais a 1 -- isso ficará mais claro adiante e os nomes das colunas não importam. Por fim, recorremos à função `pivot_wider`. Transpondo a coluna dos meses e preenchendo com os 1's, obteríamos um *frame* no qual cada mês é uma coluna onde o valor é igual a 1 para o mês correspondente na coluna data e `NA` nos demais. Como nosso objetivo é ter 0's no lugar desses `NA`, usamos o argumento `values_fill`. 
+
+```{r, warning=F, message=F}
+
+df_seasonal <- df %>%
+  
+  mutate(meses = month(data, label = T, abbr = T),
+         um = 1) %>%
+  
+  pivot_wider(names_from = meses, values_from = um, values_fill = list(um = 0))
+
+tail(df_seasonal, 5)
+
+```
+
+Agora vamos criar os *lags* das variáveis. Aqui a gente vai usar tanto a `pivot_longer` como `pivot_wider`. O primeiro passo é deixar o *frame* no formato *long*, isto é, as variáveis serão empilhadas em uma única coluna que eu chamarei de "var". Os valores ficarão na coluna "l0" que denota o *lag* 0. 
+
+Na sequência, vamos criar colunas com os *lags* desejados: 1 a 5. Essas colunas também precisarão ser colocadas no formato *long*. Finalmente, vamos expandir o *frame* (formato *wider*) reunindo as duas colunas: "var" e "lags". Isto produzirá o resultado desejado. O `group_by` e `arrange` são utilizados para garantir a ordem temporal dos dados.
+
+```{r, message=F, warning=F}
+
+df_lags <- df %>%
+  
+  pivot_longer(-"data", names_to = "var", values_to = "l0") %>%
+  
+  group_by(var) %>%
+  
+  arrange(data) %>%
+  
+  mutate(l1 = lag(l0, 1),
+         l2 = lag(l0, 2),
+         l3 = lag(l0, 3),
+         l4 = lag(l0, 4),
+         l5 = lag(l0, 5)) %>%
+  
+  pivot_longer(-c(data, var), names_to = "lag", values_to = "valor") %>%
+  
+  pivot_wider(names_from = c("var", "lag"), values_from = "valor")
+
+tail(df_lags, 5)
+
+```
+
+A grande vantagem desta abordagem é não precisar escrever o nome das variáveis para criar os *lags* -- lembrem-se de que elas podem ser dezenas ou centenas. Adicionalmente, não precisamos criar funções auxiliares ou recorrer à geração dinâmica de variáveis -- o que no contexto do `tidyverse` envolve algum tipo de *Non-Standard Evaluation* -- nem sempre tão simples para quem tá começando.
+
+**Aviso legal**: Todo o conteúdo desta página é de responsabilidade pessoal do autor e não expressa a visão da instituição a qual o autor tem vínculo profissional.

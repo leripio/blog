@@ -1,0 +1,212 @@
+---
+title: Como fazer um tracking eficiente das suas projeções
+author: Renato Leripio
+date: '2020-07-23'
+categories:
+  - Data Science
+  - Previsão
+tags:
+  - Previsão
+  - tracking
+slug: como-fazer-um-tracking-eficiente-das-suas-projeções
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: no
+---
+
+Quem realiza projeções deve manter seus resultados armazenados, de modo que seja possível recuperá-los a qualquer momento. Isso permite, por exemplo, acompanhar o desempenho do modelo ao longo do tempo. 
+
+A tarefa pode ser feita em dois passos. Primeiro, criar um `tibble` com três colunas: a data **na** qual as projeções foram geradas; a data **para a qual** as projeções foram feitas; e, por fim, os valores (ou distribuição) projetados. É possível também adicionar informações extras, como a especificação do modelo utilizado -- caso este seja atualizado regularmente.
+
+O segundo passo é armazenar fisicamente a informação para que seja possível acessá-la mais tarde. Aqui, eu prefiro utilizar o objeto `RDS` -- que é, basicamente, a estrutura para armazenagem de objetos do R. Uma boa ideia neste caso é exportar um arquivo `RDS` contendo o `tibble` a cada nova rodada de projeções e mantê-los em uma pasta.
+
+Vamos a um exemplo prático de como fazer isso. Para utilizar um contexto atual, vamos assumir que nosso objetivo seja projetar todos os dias o número de novos casos de Covid-19 no Brasil para os próximos 7 dias a partir de um modelo univariado bem simples -- um `ETS` automático do pacote `fable` (a versão `tidy` do pacote `forecast`). Os dados são importados do repositório público do Wesley Cota (https://github.com/wcota/covid19br/).
+
+### Passo 1: carregar pacotes e obter os dados 
+
+```{r data, echo = T, message = F, warning=F}
+
+library(tidyverse)
+library(lubridate)
+library(fable)
+library(tsibble)
+
+dados_url <- "https://raw.githubusercontent.com/wcota/covid19br/master/cases-brazil-states.csv"
+
+dadosBR <- readr::read_csv(dados_url) %>%
+  
+  dplyr::filter(country == "Brazil", state == "TOTAL",
+                date >= max(date) %m-% days(60)) %>%
+  
+  dplyr::select(date, newCases)
+
+tail(dadosBR, 3)
+
+```
+
+### Passo 2: ajustar o modelo ETS, realizar as projeções e salvar objeto RDS
+
+```{r save_models, message=F, warning=F, echo=F}
+
+library(lubridate)
+
+dates <- seq(Sys.Date() %m-% days(30), ymd(max(dadosBR$date)), by = "days")
+
+proj_save <- purrr::map(.x = as.list(dates), .f = function(x){ 
+  
+dados_filtro <-  dadosBR %>%
+  
+  dplyr::filter(date <= ymd(x)) 
+
+dados_fit <- dados_filtro %>%  
+    
+  tsibble::as_tsibble() %>%
+  
+  model(ets = ETS(newCases)) %>%
+  
+  forecast(h = "7 days") %>%
+  
+  dplyr::mutate(dateFrom = max(dados_filtro$date))
+  
+  saveRDS(dados_fit, paste0("tracking/forecast_", unique(dados_fit$dateFrom), ".rds"))
+
+})
+
+```
+
+```{r model, message=F, warning=F}
+
+  proj <- dadosBR %>%
+  
+  as_tsibble() %>%
+  
+  model(ets = ETS(newCases)) %>%
+  
+  forecast(h = "7 days") %>%
+  
+  dplyr::mutate(dateFrom = max(dadosBR$date))
+
+tail(proj, 3)
+
+```
+
+Em seguida, basta salvar o objeto. Uma boa ideia é incluir alguma referência no nome do arquivo: a data em que foram geradas as projeções ou a data da última observação disponível, por exemplo.
+
+```{r save, message=F, warning=F, eval = F}
+
+saveRDS(proj, paste0("tracking/forecast_", unique(proj$dateFrom), ".rds"))
+
+```
+
+Para termos uma noção do que seria o resultado ao longo de um período maior, reproduzi a ação anterior por um período de 30 dias. Assim, existem na pasta 30 arquivos `.rds` correspondendo à trajetória de projeção gerada em cada um dos 30 dias. Esses arquivos podem ser importados de uma só vez -- utilizando como identificador um padrão do nome ou simplesmente a extensão -- e empilhados para produzir as análises.
+
+```{r import, message=F, warning=F}
+
+proj_labs <- list.files("tracking/")[str_detect(list.files("tracking/"), ".rds")]
+
+proj_files <- purrr::map_dfr(.x = proj_labs, 
+                             .f = function(x) readRDS(paste0("tracking/", x)))
+
+```
+
+Para finalizar, devemos adicionar os dados que foram realizados. Isto pode ser feito dando um `join` com o nosso objeto `dadosBR`, utilizando a coluna de data como identificador. Para que o `tibble` fique mais claro, vamos renomear a coluna.
+
+```{r join, message=F, warning=F}
+
+proj_tracking <- dplyr::left_join(
+  
+  proj_files %>% 
+    
+    as_tibble() %>%
+    
+    dplyr::rename("previsto" = "newCases"),
+  
+  dadosBR %>% dplyr::rename("realizado" = "newCases")
+  
+  )
+
+```
+
+Podemos utilizar `proj_tracking` de diversas formas para acompanhar o desempenho do nosso modelo. O gráfico abaixo, por exemplo, traz a evolução das projeções um passo à frente. Apesar de o modelo não ser tão aderente à magnitude, ele é capaz de capturar a sazonalidade da série. Vale lembrar que o modelo utilizado é bem simples e serve apenas para ilustração.
+
+```{r plot, warning=F, message=F, echo=F, fig.align='center'}
+
+library(ggtext)
+
+proj_tracking %>%
+  
+  dplyr::filter(dateFrom == (date %m-% days(1))) %>%
+  
+  dplyr::slice(1:(n()-7)) %>%
+  
+  dplyr::mutate(sd = purrr::map_dbl(.x = .distribution, .f = function(x) x[["sd"]]),
+                low = previsto - 1.96*sd,
+                high = previsto + 1.96*sd) %>%
+  
+  ggplot(aes(x = date)) +
+  
+  geom_line(aes(y = previsto, color = "previsto"), lwd = 1.2) +
+  
+  geom_line(aes(y = realizado, color = "realizado"), lwd = 1.2) +
+  
+  scale_color_manual(values = c(previsto = "#0072B2", realizado = "#D55E00")) +
+  
+  labs(title = "<span style='color:#0072B2;'>Previsto</span> vs <span style='color:#D55E00;'>realizado</span>",
+       subtitle = "one-step-ahead",
+       x = "", y = "Novos casos de Covid-19 no Brasil") +
+  
+  theme_light() +
+  
+  theme(plot.title = element_markdown(lineheight = 1.1),
+        legend.position = "none") +
+  
+  scale_y_continuous(labels=function(x) format(x, big.mark = ".", scientific = FALSE)) +
+  
+  scale_x_date(date_breaks = "3 days", date_labels = "%d-%b") +
+  
+  geom_ribbon(aes(xmin = min(date), xmax = max(date), ymin = low, ymax = high), alpha = .1)
+
+```
+
+Por fim, também podemos utilizar os dados gerados anteriormente para computar métricas de acurácia para cada horizonte de previsão. Para isso, vamos utilizar a função `mape` do pacote `yardstick` para obter o erro absoluto percentual médio (MAPE). O pacote conta com diversas outras métricas conhecidas: `rmse`, `mae`, `mase`, etc. 
+
+```{r acc, warning=F, message=F}
+
+library(yardstick)
+
+proj_acc <- proj_tracking %>%
+  
+  dplyr::group_by(dateFrom) %>%
+  
+  dplyr::mutate(step_ahead = 1:n()) %>%
+  
+  dplyr::group_by(step_ahead) %>%
+  
+  yardstick::mape(truth = realizado, estimate = previsto, na.rm = TRUE)
+
+```
+
+```{r acc_plot, warning=F, message=F, echo=F}
+
+proj_acc %>%
+  
+  ggplot(aes(x = step_ahead, y = .estimate)) +
+  
+  geom_col(fill = "steelblue3") +
+  
+  labs(title = "Erro absoluto percentual médio (MAPE) por horizonte de previsão",
+       x = "Dias à frente",
+       y = "MAPE") +
+  
+  scale_x_continuous(breaks = 1:7) +
+  
+  scale_y_continuous(label = function(x) paste0(x, "%")) +
+  
+  theme_light()
+
+```
+  
+
+**Aviso legal**: Todo o conteúdo desta página é de responsabilidade pessoal do autor e não expressa a visão da instituição a qual o autor tem vínculo profissional.
