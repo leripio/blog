@@ -1,0 +1,188 @@
+---
+title: Usando DLM para estimar coeficientes variantes no tempo
+author: Renato Leripio
+date: '2020-08-22'
+slug: usando-dlm-para-estimar-coeficientes-variantes-no-tempo
+categories:
+  - Data Science
+tags:
+  - dynamic linear models
+  - dlm
+  - time varying
+subtitle: ''
+summary: ''
+authors: []
+lastmod: '2020-08-22T21:57:21-03:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: no
+projects: []
+markup: mmark
+---
+
+Em [post recente](https://www.rleripio.com.br/post/como-obter-rolling-windows-de-maneira-rapida-e-eficiente/) mostrei como obter versões *rolling* para funções específicas e como isso poderia ser utilizado para gerar coeficientes variantes no tempo em uma regressão.
+
+Uma limitação desta abordagem é que precisamos definir janelas para a estimação, o que pode alterar sensivelmente os resultados. Neste sentido, é desejável uma forma estrutural de obter coeficientes variantes no tempo. 
+
+Uma classe específica de modelos que atende a esse propósito é o ***Dynamic linear model*** (DLM). Em termos bem gerais, trata-se de escrever o modelo em um formato de estado-espaço e, na sequência, implementar algum algoritmo para retornar as estimativas dos parâmetros. Isso ficará mais claro com o exemplo.
+
+## Passo 1: carregar pacotes e importar os dados
+
+Diferente do exemplo com *rolling windows*, no qual modelei o IPCA como um processo SARIMA(1,0,0)(1,0,0)[12], aqui vou aplicar um ajuste sazonal à série de modo que possamos dispensar o termo sazonal da especificação e reduzi-la a um AR(1). Isso tornará o problema mais simples.
+
+```{r step1, warning=F, message=F}
+
+library(tidyverse)
+library(MARSS)
+library(rbcb)
+library(seasonal)
+
+# Importar IPCA livres
+
+ipca_livres <- rbcb::get_series(code = list("ipca" = 11428),
+                                start_date = "2004-01-01",
+                                as = "ts")
+
+# Aplicar ajuste sazonal
+
+ipca_livres_sa <- final(seas(ipca_livres)) 
+  
+# Colocar em formato tibble e criar termo AR(1)
+
+ipca_tbl <- ipca_livres_sa %>%
+  
+  timetk::tk_tbl() %>%
+  
+  magrittr::set_colnames(c("date", "ipca")) %>%
+  
+  dplyr::mutate(ipca_l1 = lag(ipca, 1)) %>%
+  
+  tidyr::drop_na()
+
+```
+
+## Passo 2: escrever o modelo em estado-espaço e estimar
+
+A formulação em estado-espaço pressupõe, basicamente, que existe um processo latente -- não observável -- e um conjunto de observações que chega até nós -- definido pelo modelo de *observação*. O processo latente, definido por um modelo de *estado*, evolui a partir de alguma lógica -- geralmente assumimos que é um *random walk*. Em particular, é a variância do termo de erro da equação de estado -- **$R$** -- que cria dinâmica nos coeficientes.
+
+$$ Y_t = Z\theta_t + A + V_t, Vt \sim N(0, Q) \rightarrow \text{(Observação)} \\ \theta_t = B\theta_{t-1} + U + W_t, W_t \sim N(0,R)  \rightarrow \text{(Estado)} $$
+
+Aos interessados em compreender melhor como especificar tais modelos, deixo no final algumas boas referências. 
+
+Vamos usar o pacote `MARSS` para estimar o modelo. Nosso sistema é expresso pelos objetos abaixo com o mesmo nome em que aparecem nas equações e devem ser declarados como matrizes -- ainda que em alguns casos sejam unidimensionais. Tudo o que precisa ser estimado entra como *character*. Para um AR(1) com intercepto, ambos os coeficientes variando no tempo, temos a seguinte configuração:
+
+```{r step2, warning=F, message=F, cache = T}
+
+# Número de observações
+
+n <- nrow(ipca_tbl)
+
+# Variável dependente IPCA e independente IPCA_l1
+
+y <- matrix(ipca_tbl$ipca, nrow = 1) 
+
+y_l1 <- matrix(ipca_tbl$ipca_l1, nrow = 1)
+
+# Eq. de estado
+
+B = diag(2)
+U = matrix(0, 2, 1)
+Q = matrix(c("q.alpha", 0, 
+             0, "q.beta"), 
+           2, 2)
+
+# Eq. de observação
+
+Z = array(NA, c(1, 2, n))
+Z[1, 1, ] <- rep(1, n) # Intercepto
+Z[1, 2, ] <- y_l1 # Termo AR(1)
+A <- matrix(0)
+R <- matrix("r")
+
+# Valores iniciais do sistema
+
+x0 <- list(x0 = matrix(0, nrow = 2))
+
+# Reunir as informações
+
+dlm.terms <- list(B = B, U = U,
+                  Q = Q, Z = Z,
+                  A = A, R = R)
+
+## Ajuste do DLM
+
+dlm.fit <- MARSS(y, 
+                 inits = x0, 
+                 model = dlm.terms, 
+                 silent = TRUE)  
+
+```
+
+É importante realizar diagnósticos a fim de atestar a validade do modelo. Dado que o objetivo aqui é expositivo, pularemos esta etapa.
+
+## Passo 3: Resultados
+
+Os valores do coeficiente ao longo do tempo podem ser obtidos em `dlm.fit$states`, assim como seu erro-padrão em `dlm.fit$states.se`. A partir deles, podemos gerar um gráfico para acompanhar a evolução do coeficiente autorregressivo. Adicionalmente, vamos incluir o valor do coeficiente obtido por um AR(1) fixo no tempo para servir de comparação.
+
+```{r plot, message=F, warning=F, echo = F}
+
+## Benchmark
+
+ar1.fit <- arima(ipca_livres_sa, order = c(1,0,0))
+
+## Plot
+
+out.tidy <- ipca_tbl %>%
+  
+  dplyr::mutate(coef.dlm = dlm.fit$states[2, ],
+                coef.dlm.se = dlm.fit$states.se[2, ],
+                coef.dlm.low = coef.dlm - 1.96*coef.dlm.se,
+                coef.dlm.high = coef.dlm + 1.96*coef.dlm.se,
+                coef.ar1  = ar1.fit$coef["ar1"],
+                coef.ar1.se = ar1.fit$var.coef["ar1", "ar1"] %>% sqrt(),
+                coef.ar1.low = coef.ar1 - 1.96*coef.ar1.se,
+                coef.ar1.high = coef.ar1 + 1.96*coef.ar1.se)
+
+library(ggtext)
+
+out.tidy %>%
+  
+  ggplot(aes(x = date)) +
+  
+  geom_line(aes(y = coef.dlm), color = "darkblue", lwd = 1) +
+  
+  geom_ribbon(aes(ymin = coef.dlm.low, ymax = coef.dlm.high, 
+                  xmin = min(date), xmax = max(date)), 
+              alpha = 0.3, fill = "steelblue3") +
+  
+  geom_ribbon(aes(ymin = coef.ar1.low, ymax = coef.ar1.high, 
+                  xmin = min(date), xmax = max(date)), 
+              alpha = 0.2, fill = "red") +
+  
+  geom_line(aes(y = coef.ar1), color = "red", lwd = 1) +
+  
+  theme_light() +
+  
+  theme(plot.title = element_markdown(lineheight = 1.1),
+        axis.title = element_text(size = 13)) +
+  
+  labs(title = "<span style='color:#002266;'><b>Coeficiente variante no tempo</b></span> vs <span style='color:#ff1a1a;'><b>estático </b></span>",
+       x = "", y = "")
+
+```
+
+A principal mensagem aqui é que, enquanto a estimação estática parece ser uma boa estimativa do coeficiente até meados de 2016, o mesmo não pode ser dito para o período seguinte. Em particular, isto tende a ocorrer quando existem mudanças estruturais importantes na série de interesse.
+
+No caso específico do nosso exercício, a literatura reporta que a persistência inflacionária guarda relação direta com o nível da inflação e inversa com a credibilidade da autoridade monetária. Nesse sentido, apesar da nossa especificação não controlar diversos fatores relevantes, faz sentido pensar que a persistência deva ser menor no período recente.
+
+**O Código completo** encontra-se no [repositório do blog no GitHub.](http://www.github.com/leripio/blog)
+
+**Referências**
+
+1. Holmes, E. E., M. D. Scheuerell, and E. J. Ward. [Applied time series analysis for fisheries and environmental data.](https://nwfsc-timeseries.github.io/atsa-labs/) NOAA Fisheries, Northwest Fisheries Science Center, 2725 Montlake Blvd E., Seattle, WA 98112. Contacts eli.holmes@noaa.gov, eric.ward@noaa.gov, and mark.scheuerell@noaa.gov.
+
+2. Analysis of multivariate timeseries using the MARSS package. https://cran.r-project.org/web/packages/MARSS/vignettes/UserGuide.pdf
+
+**Aviso legal**: Todo o conteúdo desta página é de responsabilidade pessoal do autor e não expressa a visão da instituição a qual o autor tem vínculo profissional.
