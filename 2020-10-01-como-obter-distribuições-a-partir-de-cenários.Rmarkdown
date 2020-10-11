@@ -1,0 +1,162 @@
+---
+title: Como medir a incerteza em cenários
+author: Renato Leripio
+date: '2020-10-01'
+categories:
+  - Previsão
+tags:
+  - cenário
+  - distribuição
+  - incerteza
+  - previsão
+slug: como-obter-distribuições-a-partir-de-cenários
+lastmod: '2020-10-01T14:12:38-03:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: no
+markup: mmark
+---
+  
+Nem sempre empregamos modelos econométricos ou de machine learning para fazer projeções. É comum termos à disposição alguma forma funcional calibrada ou parâmetros que nos informam sobre como evolui determinada variável. A partir destas informações, podemos conjecturar as realizações futuras a partir de cenários para as variáveis explicativas. 
+
+Imagine, por exemplo, que o IPCA dos preços livres aumente cerca de 0.5p.p para cada 10% de depreciação cambial. Podemos, neste caso, fazer projeções para o IPCA com base no que esperamos para a taxa de câmbio em diferentes cenários (tudo o mais constante). Isso nos dará projeções pontuais para o IPCA condicional aos valores assumidos para o câmbio: no cenário A o câmbio avança 5%; no cenário B o câmbio recua 7%; e por aí vai.
+
+Apesar de extremamente útil, esta abordagem traz limitações. Uma delas é não fornecer, para um pequeno conjunto de cenários, uma distribuição completa de projeções a partir da qual seja possível inferir a incerteza em torno do valor central. A prática comum costuma ser definir cenários para os limites superior e inferior e assumir que todos os valores estão contidos neste intervalo com a mesma probabilidade. 
+
+Entretanto, em certas situações nós temos uma noção do balanço de risco dos nossos cenários: é mais provável que o câmbio termine o ano com variação positiva do que negativa, por exemplo. Além disso, pode ser que a nossa proejeção dependa do cenário para mais de uma variável. Neste caso, precisamos considerar também a interação entre os possíveis cenários de todas as variáveis. 
+
+Uma solução para lidar com essas dificuldades é gerar distribuições que reflitam o nosso cenário para cada variável e, em seguida, simular um grande número de cenários conjuntos para o resultado final. Para ilustrar, vamos recorrer a um exemplo típico dos livros-texto de macroeconomia: a evolução da dívida pública.
+
+De maneira simplificada, a relação dívida pública/PIB evolui de acordo com a seguite expressão:
+
+$$ \Delta b_t = (r - g) \times b_{t-1} - s $$
+
+onde: $ b $ é a relação dívida/PIB; $ r $ é a taxa de juros real; e  $ s $ é o superávit primário como proporção do PIB. 
+
+Se quisermos usar essa expressão para projetar a dívida pública para 2021, precisaríamos de um cenário para quatro variáveis em 2021: taxa de juros nominal, inflação, crescimento do PIB e superávit primário.  
+
+Para as três primeiras, vamos tomar como referência as [expectativas do mercado divulgadas pelo BCB](https://www4.bcb.gov.br/pec/GCI/PORT/focus/DISTFREQ/P20200908-Distribui%C3%A7%C3%B5es%20de%20Frequ%C3%AAncia%20das%20Expectativas%20de%20Mercado%20para%20IPCA%20Selic%20PIB%20C%C3%A2mbio.pdf) em agosto. Nelas, os projeções para o PIB de 2021 aparecem centradas ao redor de 3.5% com grande assimetria à esquerda. O IPCA segue padrão parecido, centrado em 2.9% e maior massa à esquerda deste valor. A taxa de juros Selic, por sua vez, é bimodal com valores de 2% e 3.5%. 
+
+Vamos usar o pacote `sn` para gerar distribuições (assimétricas) semelhantes. Para a taxa de juros Selic, vamos assumir que só existem dois valores possíveis: 2% com 40% de chance e 3.5% com 60% de chance. E o superávit, para simplificar, será 0%.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE, echo = TRUE)
+```
+
+```{r distros}
+
+library(sn)
+library(tidyverse)
+
+# Objetos para simular as ditribuições via pacote sn
+# Argumento gamma controla a assimetria
+lista_cp <- list("ipca" = c(mean = 2.9, s.d. = 0.39, gamma = -0.4),
+                 "pib" = c(mean = 3.48, s.d. = 0.68 , gamma = -0.6))
+
+lista_dp <- purrr::map(.x = lista_cp, .f = cp2dp, family = "sn")
+
+# Número de simulações
+n_sim <- 100
+
+# Tibble com valores simulados em cada coluna
+set.seed(123)
+
+variaveis_sim <- tibble(
+  
+  ipca  = sn::rsn(n_sim, dp = lista_dp[['ipca']]),
+  pib   = sn::rsn(n_sim, dp = lista_dp[['pib']]),
+  selic = sample(c(2.0, 3.5),  n_sim, 
+                 prob = c(0.40, 0.60), 
+                 replace = TRUE
+                 )
+  )
+
+```
+
+Antes de prosseguir, cabe observar o histograma das distribuições geradas e como elas possuem, de fato, assimetria. No fim das contas, isto vai contribuir para elevar a probabilidade de cenários que contenham valores para PIB e IPCA mais baixos.
+
+```{r plot.distro, echo = FALSE}
+
+library(gridExtra)
+
+plot_distro <- purrr::map(.x = as.list(names(lista_dp)), .f = function(x){
+
+sn::rsn(n_sim, dp = lista_dp[[x]]) %>%
+
+    as_tibble() %>%
+
+    ggplot(aes(x = value)) +
+
+    geom_histogram(fill = "steelblue2", alpha = 0.8) +
+
+    theme_bw() +
+
+    labs(title = x,
+         x = "valor",
+         y = "n")
+
+})
+
+grid.arrange(plot_distro[[1]], 
+             plot_distro[[2]], 
+             ncol = 2)
+
+```
+
+Todos os cenários simulados estão no objeto `variaveis_sim`. Ele será utilizado para alimentar a expressão que define a variação da dívida pública. Antes, porém, precisamos gerar todas as combinações possíveis daqueles valores. A única ressalva aqui é que, com 100 simulações, temos $ 100^K $ cenários, onde $ K $ é o número de variáveis. Portanto, ampliar demais o número de variáveis e/ou de simulações pode gerar um objeto impossível de armazenar na memória.
+
+```{r cenarios}
+
+cenarios_sim <- purrr::cross3(.x = variaveis_sim$ipca,
+                              .y = variaveis_sim$pib,
+                              .z = variaveis_sim$selic)
+
+```
+
+Por fim, simulamos os possíveis resultados para a dívida no próximo ano a partir de um valor inicial de 60%, conforme abaixo:
+
+```{r div.sim}
+
+divida_sim <- purrr::map_dbl(.x = cenarios_sim, .f = function(x){
+
+x <- unlist(x)
+
+ipca  <- x[1]
+pib   <- x[2]
+selic <- x[3]
+
+r <- selic - ipca
+
+b_inicial <- 60.0
+
+b_final <- (r - pib)*(b_inicial/100)
+
+})
+
+```
+
+O resultado segue abaixo. O valor central para nossa projeção é ao redor de -2p.p, o que indica uma dívida menor para 2021 -- lembrando que existe zero compromisso aqui com a realidade. Isso seria compatível com um cenário de juros reais inferiores ao crescimento do PIB e sem déficit primário. 
+
+Adicionalmente, podemos extrair a incerteza através do quantis da distribuição: por exemplo, a dívida deve cair entre 3.13p.p e 1.11p.p considerando o intervalo de 95%. Alternativamente, poderíamos extrair a probabilidade de ocorrência de cenários extremos: qual a chance de a dívida cair mais do que 3.5p.p ou menos que 1p.p? Fica de exercício para os interessados!
+
+```{r sim_hist, echo = FALSE}
+
+tibble(b_final = divida_sim) %>% 
+  
+  ggplot(aes(x = b_final)) +
+  
+  geom_histogram(fill = "steelblue3") +
+  
+  labs(title = "Variação da dívida pública para o ano seguinte (p.p)",
+       y = "frequência", x = "Variação (p.p)") +
+  
+  theme(axis.text = element_text(size = 12),
+        title = element_text(size = 12)) +
+  
+  theme_light()
+
+```
+
+**Aviso legal**: Todo o conteúdo desta página é de responsabilidade pessoal do autor e não expressa a visão da instituição a qual o autor tem vínculo profissional.
