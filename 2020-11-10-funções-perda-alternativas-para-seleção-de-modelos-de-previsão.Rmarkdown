@@ -1,0 +1,174 @@
+---
+title: Funções-perda alternativas para seleção de modelos de previsão
+author: Renato Leripio
+date: '2020-11-10'
+slug: funções-perda-alternativas-para-seleção-de-modelos-de-previsão
+categories:
+  - Previsão
+tags:
+  - previsão
+  - loss
+  - seleção
+  - model selection
+subtitle: ''
+summary: ''
+authors: []
+lastmod: '2020-11-10T22:52:11-03:00'
+featured: no
+image:
+  caption: ''
+  focal_point: ''
+  preview_only: no
+projects: []
+markup: mmark
+---
+
+Em um [post passado](https://www.rleripio.com.br/post/tales-from-tails-analisando-o-risco-em-previsoes/), abordei uma métrica alternativa para medir a acurácia de modelos de previsão. A *risk measure* buscava eliminar a possibilidade de escolher modelos com chances de entregar valores extremos. A ideia aqui é ser um tanto mais geral.
+
+O problema de escolher um modelo de previsão geralmente consiste em minimizar alguma métrica, sendo comum o erro absoluto médio (MAE) ou a raiz do erro quadrado médio (RMSE). Essas métricas funcionam como *funções-perda*, isto é, elas expressam um objetivo. Entretanto, muitas vezes não traduzimos de forma ampla nosso objetivo ao escolher um modelo de previsão.
+
+Por exemplo, MAE e RMSE são funções simétricas. Além disso, ambas usam média simples para sumarizar os erros de projeção. Quando utilizamos alguma delas para avaliar qual modelo é melhor, no fundo estamos dizendo: 
+
+> *"Eu não me importo com o sinal do erro -- 2 unidades para cima ou para baixo impactam igualmente o meu resultado --, bem como não faz diferença se os maiores erros foram cometidos recentemente ou em período mais distante."*
+
+Seguramente essas condições não se aplicam a todos os negócios. Alguém interessado em prever demanda pode preferir errar para mais a errar para menos. Também é possível que prefira modelos cujas projeções tenham ficado mais próximas dos valores realizados nos últimos 6 meses em comparação aos primeiros 6 meses do *backtest*.
+
+Em suma, em muitas situações é preciso definir quais condições o modelo deve atender e isso envolve criar uma **função**. Essa função deve sumarizar os erros das projeções de modo a representar nosso **objetivo**.
+
+Considere a função abaixo em que $ x $ é o erro, isto é, a diferença entre o valor previsto e o realizado:
+
+$$ \begin{equation}
+f(x) = 
+\begin{cases} 
+\ \frac{x}{2} & \text{se } x \geq 0 \\
+\ 2|x|         & \text{se } x < 0
+\end{cases}
+\end{equation} $$
+
+Em palavras, estamos dizendo que um erro negativo será penalizado duas vezes mais que no MAE convencional e um erro positivo duas vezes menos. Adicionalmente, podemos definir que erros mais recentes ganhem maior peso. Isso pode ser feito computando uma média ponderada em que os pesos são a posição da observação no vetor de erros. Abaixo um exemplo de como declarar esta função:
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, warning = FALSE, message = FALSE)
+```
+
+```{r loss, echo = TRUE}
+
+alternative_loss <- function(x){
+  
+y <- ifelse(x >= 0, x/2, 2*abs(x))
+
+w <- seq(from = 1, to = length(y), by = 1)
+
+w <- w/sum(w)
+
+output <- weighted.mean(y, w)
+
+return(output)
+  
+}
+
+```
+
+Podemos visualizar $ f(x) $ em forma de gráfico para ganhar intuição. 
+
+```{r plot_loss}
+
+library(ggtext)
+library(tidyverse)
+
+loss1_tbl <- tibble(x = seq(-2, 2, 0.001),
+                    y_loss1 = purrr::map_dbl(.x = x, .f = function(x) ifelse(x >= 0, x/2, 2*abs(x))),
+                    y_mae  = purrr::map_dbl(.x = x, .f = function(x) abs(x)))
+
+loss1_tbl %>% 
+  
+ggplot(aes(x = x)) + 
+  
+  geom_line(aes(y = y_loss1, color = "loss1"), lwd = 1) +
+  
+  geom_line(aes(y = y_mae, color = "mae"), lwd = 1) +
+  
+  labs(title = "Função-perda costumizada vs. Erro absoluto",
+       x = "Erro", y = "Perda") +
+  
+  geom_vline(xintercept = 0, linetype = "dashed") +
+  
+  theme_light() +
+  
+  theme(plot.title = element_markdown(lineheight = 1.1),
+        axis.title = element_text(size = 13),
+        legend.position = "none") +
+  
+  scale_color_manual(values = c("darkblue", "red")) +
+  
+  labs(title = "<span style='color:#002266;'><b>Perda customizada</b></span> vs <span style='color:#ff1a1a;'><b>Erro absoluto</b></span>",
+       x = "Erro", y = "Perda")
+
+```
+
+```{r preliminary}
+
+# Load packages
+library(forecast)
+library(tidyverse)
+
+# Load data
+data("wineind")
+
+```
+
+```{r rafa}
+# Load rafa function (personal function to fit several methods and return backtests)
+source("/home/renato/Documents/engines/rafa2/main.R", local = knitr::knit_global())
+
+```
+
+Na sequência, ajustamos um conjunto de modelos aos dados de vendas mensais de vinhos na Austrália -- disponível no pacote `forecast` -- e computamos os erros de projeção fora da amostra para as últimas 12 observações. Abaixo segue a classificação a partir do MAE convencional:
+
+```{r forecast}
+
+wineind_fc <- rafa2(wineind, num.backtest = 12, box.cox = 0, acc.measure = "mae")
+
+```
+
+```{r accuracy1}
+
+wineind_fc$accuracy %>% 
+  
+  dplyr::arrange(.estimate) %>% 
+  
+  dplyr::slice(1:3) %>% 
+  
+  dplyr::select(-.estimator)
+
+``` 
+
+Na sequência, podemos utilizar nossa medida alternativa para classificar os modelos. Basicamente, estamos pegando o mesmo vetor de erros e aplicando a nova função. Os resultados são:
+
+```{r accuracy_loss1}
+
+acc_loss1 <- purrr::map_df(.x = wineind_fc$backtest, .f = function(x){
+  
+erro <- x$estimate - x$truth
+
+perda <- alternative_loss(erro)
+
+  }) %>% 
+  
+  tidyr::gather(".method", ".estimate") %>% 
+  
+  dplyr::arrange(.estimate) %>% 
+  
+  dplyr::mutate(.metric = "alternative", .after = .method)
+
+acc_loss1 %>% 
+  
+  dplyr::slice(1:3)
+
+```
+
+Os valores não são diretamente comparáveis, o que importa é a ordenação. Considerando o objetivo mais amplo, o modelo `snaive` obteve melhor performance em relação ao `ets`. 
+
+Evidentemente, encontramos diversas características desejáveis em métricas como MAE ou RMSE e a ideia deste post não é excluí-las do jogo -- tampouco colocar a métrica adotada no exemplo como referência. A mensagem aqui é que, à medida que ganha relevância o processo de selecionar modelos, deve-se ter em mente que objetivo pretende-se alcançar e como traduzi-lo em uma métrica adequada. Neste aspecto, conhecer formas funcionais é fundamental.
+
+**Aviso legal**: Todo o conteúdo desta página é de responsabilidade pessoal do autor e não expressa a visão da instituição a qual o autor tem vínculo profissional.
